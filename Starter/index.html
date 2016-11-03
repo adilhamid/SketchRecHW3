@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Homework 3 Starter</title>
+    <!-- An AMD-loader like RequireJS is necessary for srlib's asynchronous modules -->
+    <script src="require.js"></script>
+    <!-- Load srlib following RequireJS -->
+    <script src="srlib.js"></script>
+    <!-- JQuery provides a very nice set of tools when dealing with AJAX requests -->
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
+    <script type="text/javascript">
+        // Begin processing once webpage loaded
+        $(document).ready(function () {
+            // Globals
+            sketches = {};
+            deserializer = new srlib.core.data.io.Deserializer();
+            serializer = new srlib.core.data.io.Serializer();
+            // Metrics
+            Total = 0;
+            TP = 0;
+            FP = 0;
+            TN = 0;
+            FN = 0;
+            drawSubstrokes = true;
+            startSketch = 4000; // Rather than start with the oldest, will look at some of the more recent sketches for now
+            maxSketches = startSketch + 100; // To begin with, simply consider 200 sketches for segmentation; can change this value anytime for more testing
+            getSketches();
+        });
+        
+        function updateDrawSubstrokes() {
+            drawSubstrokes = true;
+            $('#drawSubstrokes').prop('checked', true);
+            $('#drawShapes').prop('checked', false);
+            updateCanvas();
+        }
+        function updateDrawShapes() {
+            drawSubstrokes = false;
+            $('#drawSubstrokes').prop('checked', false);
+            $('#drawShapes').prop('checked', true);
+            updateCanvas();
+        }
+        // Draw data on update of sketch selection
+        function updateCanvas() {
+            var c = document.getElementById("sketch");
+            var ctx = c.getContext("2d");
+            // Clear canvas first
+            ctx.clearRect(0, 0, c.width, c.height);
+            var current = sketches[$('#sketches').val()]; // Select the sketch selected from global dictionary
+            // Draw substrokes
+            if (drawSubstrokes) {
+                for (var key in current.getSubstrokes()) {
+                    // Draw new substroke
+                    var stroke = current.getSubstrokes()[key]; // Select the drawing area
+                    var points = stroke.getPoints();
+                    ctx.beginPath();
+                    ctx.lineWidth = "5";
+                    ctx.strokeStyle = "#" + ((1 << 24) * Math.random() | 0).toString(16); // Randomize stroke colors for easy visualization
+                    for (var i = 0; i < points.length; i++) { // Set path to point values
+                        if (i == 0) {
+                            ctx.moveTo(points[i].getX(), points[i].getY());
+                        }
+                        else {
+                            ctx.lineTo(points[i].getX(), points[i].getY());
+                        }
+                    }
+                    ctx.stroke();  // Draw it
+                }
+            }
+            else { // Draw shapes, all shape items one color
+                for (var key in current.getShapes()) {
+                    var shape = current.getShapes()[key];
+                    // Check for low-level... Don't draw just nodes or lines
+                    if ((shape.getInterpretation() != "node") && (shape.getInterpretation() != "line")) {
+                        var subelements = shape.getSubElements(); // Get the subelements inside the shape
+                        var shapeColor = "#" + ((1 << 24) * Math.random() | 0).toString(16); // Randomize shape colors for easy visualization
+                        for (var j = 0; j < subelements.length; j++) {
+                            // Check if subelement is another shape
+                            if (subelements[j] instanceof srlib.core.data.container.Shape) {
+                                subelements = subelements.concat(subelements[j].getSubElements()); // Simply append next level subelements for drawing
+                            }
+                            else {
+                                // Check if subelement is substroke; we only want to draw processed strokes, so ignore points and strokes for now
+                                if (subelements[j] instanceof srlib.core.data.container.Substroke) {
+                                    var points = subelements[j].getPoints();
+                                    ctx.beginPath();
+                                    ctx.lineWidth = "5";
+                                    ctx.strokeStyle = shapeColor;
+                                    for (var i = 0; i < points.length; i++) { // Set path to point values
+                                        if (i == 0) {
+                                            ctx.moveTo(points[i].getX(), points[i].getY());
+                                        }
+                                        else {
+                                            ctx.lineTo(points[i].getX(), points[i].getY());
+                                        }
+                                    }
+                                    ctx.stroke();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        function getMetrics(original, current) {
+            // Evaluation method and details to be provided later
+        }
+
+		
+		var COINCIDENT_THRESHOLD = 0.1;
+
+        function distance_strokes( stroke1){
+            var length = stroke1.points.length;
+            if(length > 1 ) {
+                var dist = Math.sqrt(Math.pow(stroke1.points[0].getX() - stroke1.points[length-1].getX(),2) + Math.pow( stroke1.points[0].getY() - stroke1.points[length - 1].getY(),2));
+                return dist;
+            }
+            else
+                return 0;
+        }
+
+        function distance_points( point1, point2){
+            var dist = Math.sqrt(Math.pow(point1.getX() - point2.getX(),2) + Math.pow(point1.getY() - point2.getY(),2));
+            return dist;
+        }
+
+        // Orthogonal distance - http://stackoverflow.com/a/6853926
+        function pDistance(point, corner1, corner2) {
+            var A = point.getX() - corner1.getX();
+            var B = point.getY() - corner1.getY();
+            var C = corner2.getX() - corner1.getX();
+            var D = corner2.getY() - corner1.getY();
+            var dot = A * C + B * D;
+            var len_sq = C * C + D * D;
+            var param = -1;
+            if (len_sq != 0) //in case of 0 length line
+                param = dot / len_sq;
+            var xx, yy;
+            if (param < 0) {
+                xx = corner1.getX();
+                yy = corner1.getY();
+            }
+            else if (param > 1) {
+                xx = corner2.getX();
+                yy = corner2.getY();
+            }
+            else {
+                xx = corner1.getX() + param * C;
+                yy = corner1.getY() + param * D;
+            }
+            var dx = point.getX() - xx;
+            var dy = point.getY() - yy;
+            return dx * dx + dy * dy;
+        }
+
+        function calculate_angle(point1, point2, point3){
+            var dx1 = point2.getX() - point1.getX();
+            var dx2 = point3.getX() - point2.getX();
+
+            var dy1 = point2.getY() - point1.getY();
+            var dy2 = point3.getY() - point2.getY();
+
+            var angle = Math.atan2(((dx2 * dy1) - (dx1 * dy2)) , ((dx1 * dx2) + (dy1 * dy2)));
+            return angle;
+        }
+        //The object for hodling the nodes in a truss
+        function vertex_nodes(){
+            this.count = 0;
+            this.strokes = []
+            this.point= [];
+        }
+
+        function IsTruss(substrokes){
+            var nodelist = [];
+            var DIST_THRESHOLD = 1.00;   // Please Update the threshold for this check should be some percentage of the average length of the strokes.
+            //get the convex hull of the truss
+            for(var i =0; i< substrokes.length; i++){
+                var temp_node = new vertex_nodes();
+                var stroke1 = substrokes[i];
+                temp_node.strokes.push(stroke1);
+                for(var j =0; j< substrokes.length; j++){
+                    if( i ==j )
+                        continue;
+
+                    var length1 = substrokes[i].points.length-1;
+                    var length2 = substrokes[j].points.length-1;
+
+                    var dist11 = distance_points(substrokes[i].points[0], substrokes[j].points[0]);
+                    var dist12 = distance_points(substrokes[i].points[0], substrokes[j].points[length2]);
+                    var dist21 = distance_points(substrokes[i].points[length1], substrokes[j].points[0]);
+                    var dist22 = distance_points(substrokes[i].points[length1], substrokes[j].points[length2]);
+
+                    if( dist11 < DIST_THRESHOLD && (!(dist12 < DIST_THRESHOLD || dist21 < DIST_THRESHOLD || dist22 < DIST_THRESHOLD ))) {
+                        temp_node.strokes.push(substrokes[j]);
+                        temp_node.point.push(substrokes[i].points[0]);
+                        temp_node.point.push(substrokes[j].points[0]);
+                    }
+                    else if( dist12 < DIST_THRESHOLD && (!(dist11 < DIST_THRESHOLD || dist21 < DIST_THRESHOLD || dist22 < DIST_THRESHOLD ))) {
+                        temp_node.strokes.push(substrokes[j]);
+                        temp_node.point.push(substrokes[i].points[0]);
+                        temp_node.point.push(substrokes[j].points[length2]);
+                    }
+                    else if( dist21 < DIST_THRESHOLD && (!(dist12 < DIST_THRESHOLD || dist11 < DIST_THRESHOLD || dist22 < DIST_THRESHOLD ))) {
+                        temp_node.strokes.push(substrokes[j]);
+                        temp_node.point.push(substrokes[i].points[length1]);
+                        temp_node.point.push(substrokes[j].points[0]);
+                    }
+                    else if( dist22 < DIST_THRESHOLD && (!(dist12 < DIST_THRESHOLD || dist21 < DIST_THRESHOLD || dist11 < DIST_THRESHOLD ))) {
+                        temp_node.strokes.push(substrokes[j]);
+                        temp_node.point.push(substrokes[i].points[length1]);
+                        temp_node.point.push(substrokes[j].points[length2]);
+                    }
+                    else
+                    {
+                       continue; // For truss we need to have the substrokes connected to some node.
+                    }
+                    // Not sure whether to add more checks in the truss or not.
+
+                }
+            }
+            var flag = false;
+            for(var i =0 ;i< nodelist.length; i++){
+                if(nodelist[i].count >1 && nodelist[i].point.length>1)
+                {
+                    flag= true;
+
+                }
+                else
+                    flag= false;
+            }
+            return flag;
+        }
+
+        function IsArrow(substrokes_list){
+            var count=0;
+            var Arrowtype;
+            var triangle_pass;
+            var diamond_pass;
+
+            var mpassed = false;
+
+            var shaft_length = Number.MIN_VALUE;
+            var shaft_stroke=[];
+            shaft_stroke.push(substrokes_list[0]);
+            shaft_stroke.push(0);
+            for(var i=0 ; i<substrokes_list.length ;i++)
+            {
+                if(substrokes_list[i].points.length >2) {
+                    count++;
+
+                    var temp_dist = distance_strokes(substrokes_list[i]);
+                    if( temp_dist > shaft_length){
+                        shaft_stroke.splice(0, 1, substrokes_list[i]);
+                        shaft_stroke.splice(1,1,i); // to keep the index of head shaft among other strokes
+                        shaft_length = temp_dist;
+                    }
+
+                }
+            }
+
+            if(count < 3)
+                return false;
+
+            //check for the constraints on the head of the shaft
+            //Check one- Length Test
+            var threshold = 0.30 * shaft_length;
+            for( var i =0 ; i< substrokes_list.length; i++){
+                var dist_temp =  distance_strokes(substrokes_list[i]);
+                if( dist_temp < threshold ){
+                    mpassed = true;
+                }
+                else if(dist_temp > threshold+1)
+                    mpassed = false;
+                else
+                {
+                    // this is the case when we will
+                   // substrokes_list.splice(i,1);
+                }
+            }
+
+            var angles_pass = false;
+            var far_endpoints_list = [];
+            var near_endpoints_list = [];
+
+            // Calculating the farthest points from the shaft
+            for( var i= 0 ; i< substrokes_list.length; i++){
+                var farthest_distval = Number.MIN_VALUE;
+                var farthest_point = new srlib.core.data.container.Point() ;
+                var near_distval = Number.MAX_VALUE;
+                var nearest_point = new srlib.core.data.container.Point();
+                for( var j = 0 ; j<substrokes_list[i].points.length; j++ ){
+                    if(shaft_stroke[1] == j)  // checking the index of the
+                        continue;
+                    var shpt = shaft_stroke[0].points.length-1;
+                    var temp_dist = pDistance(substrokes_list[i].points[j], shaft_stroke[0].points[0], shaft_stroke[0].points[shpt]);
+                    if( temp_dist > farthest_point) {
+                        farthest_distval = temp_dist;
+                        farthest_point = substrokes_list[i].points[j];
+                    }
+                    if( temp_dist < near_distval){
+                        nearest_point = substrokes_list[i].points[j];
+                        near_distval = temp_dist;
+                    }
+                }
+                far_endpoints_list.push(farthest_point);
+                near_endpoints_list.push(nearest_point);
+            }
+
+            //checking the coincidence of the points and calculate the average common point of the arrow head and other arms
+            var shaft_head_point ;
+            var shaft_tail_point;
+            var dist1 = 0, dist2 = 0;
+            for(var i =0 ; i< near_endpoints_list.length; i++){
+                var newpnt =new srlib.core.data.container.Point(near_endpoints_list[i].x, near_endpoints_list[i].y);
+                dist1 += distance_points(newpnt, shaft_stroke[0].points[0]);
+                dist2 += distance_points(newpnt, shaft_stroke[0].points[shaft_stroke[0].points.length-1]);
+            }
+            dist1 /= near_endpoints_list.length;
+            dist2 /= near_endpoints_list.length;
+
+            if( dist1 < dist2){
+                shaft_head_point = 0;
+                shaft_tail_point = shaft_stroke[0].points.length-1;
+            }
+            else{
+                shaft_head_point = shaft_stroke[0].points.length-1;
+                shaft_tail_point = 0;
+            }
+
+            // check for the acute angles.
+            var angle_check= false;
+            for(var i =0 ; i<far_endpoints_list.length; i++){
+                var angle = 1;//= calculate_angle(shaft_stroke[0].points[shaft_tail_point] , shaft_stroke[0][shaft_head_point], far_endpoints_list[i]);
+                if(angle < 1.3){
+                    angle_check = true;
+                }
+                else {
+                    angle_check = false;
+                    break;
+                }
+            }
+            // If it passes all the constraints of the arrow then we have an arrow.
+            if(mpassed && angle_check){
+                return true;
+            }
+            else
+                return false;
+
+        }
+
+
+        // Load data, populating global dictionary of sketch objects and selection list for viewing ease
+        function getSketches() {
+            // For this assignment, sketches will live on srl_db
+            // See http://srl-prod1.cs.tamu.edu:7750/doc/ for more info about using the API
+            while (startSketch < maxSketches) {
+               $.ajax({url: "http://srl-prod1.cs.tamu.edu:7750/getSketches?domain=MechanixCleaned&interpretation=force&skip=" + String(startSketch),success: function (result) {
+				for (var i = 0; i < result.length; i++) {
+                json = result[i]; // Get original sketch
+                var original = deserializer.fromSketchMLJSON(JSON.stringify(json)); // Put in srlib object for processing
+                var current = deserializer.fromSketchMLJSON(JSON.stringify(json)); // Make a deep copy for your editing purposes
+                // var shapes = current.getShapes();
+                current.setShapes({}); // Empty the shapes array so you can populate it with your recognition code; will compare against the original's trussShape set
+                
+				//Create all substrokes of a stroke
+				var subStrokes = [];
+                var averageLength = 0; // calculating the average length of the substrokes
+                for (var key in current.getSubstrokes()) {
+                    if (current.getSubstrokes()[key].getPoints().length > 3) { // only if the substrokes are greater than 3
+                        subStrokes.push(current.getSubstrokes()[key]);
+                        averageLength += getStrokeLength(current.getSubstrokes()[key]);
+                    }
+                }
+                averageLength = averageLength / subStrokes.length;
+                var connectivityMatrix = getConnectivityMatrix(subStrokes, averageLength * COINCIDENT_THRESHOLD);
+                var matrixData = deepObjectCopy(connectivityMatrix);
+                var trussStrokes = getTrussStrokes(matrixData);
+                // Handle the diamond and triangle arrows later .. .. .. 
+                var possibleArrowStrokes = getOtherIndexes(trussStrokes, subStrokes.length);
+                //move nonarrow strokes back to truss.
+                var arrowStrokes = divideArrowStrokes(possibleArrowStrokes, connectivityMatrix); // Array of all arrow strokes
+                var trussShape = checkTruss(trussStrokes, subStrokes);
+                current.addShape(trussShape);
+                for (var j = 0; j < arrowStrokes.length; j++) {
+                    var arrowShape = checkArrow(arrowStrokes[j], subStrokes);
+                    current.addShape(arrowShape)
+                }
+                getMetrics(original, current); // Call getMetrics for this sketch
+                // Save both sketches for visual comparison
+                sketches["old-" + original.getId()] = original;
+                $('#sketches').append($('<option/>', {
+                    value: "old-" + original.getId(), // Save sketch id as value for easy access from global dictionary
+                    text: "old-" + original.getId() // Show id as value
+                }));
+                sketches["new-" + current.getId()] = current;
+                $('#sketches').append($('<option/>', {
+                    value: "new-" + current.getId(), // Save sketch id as value for easy access from global dictionary
+                    text: "new-" + current.getId() // Show id as value
+                }));
+                           }
+                 }
+                 });
+                 startSketch = startSketch + 50; // getSketches gets 50 sketches at a time always, break into requests with a skip/start counter
+            }
+        }
+        function deepObjectCopy(array) {
+            var newArray = [];
+            for (var i = 0; i < array.length; i++)
+                newArray.push(array[i].slice(0));
+            return newArray;
+        }
+
+        function getOriginalStrokes(indexes,strokes){
+            var shapeStrokes = [];
+            for(var i=0; i< indexes.length; i++){
+                shapeStrokes.push(strokes[indexes[i]]);
+            }
+            return shapeStrokes;
+        }
+        function checkTruss(trussStrokes, subStrokes) {
+            var newShape = new srlib.core.data.container.Shape();
+            var origStrokes = getOriginalStrokes(trussStrokes,subStrokes);
+            if (IsTruss(origStrokes) || true) {
+                newShape.setInterpretation("truss"); // Whatever the shape represents
+                newShape.setConfidence(1.0); // Your recognizer's confidence, may come from how close to a threshold it is in your recognizer, or even probabilities in more sophisticated recognizers
+            } else {
+                newShape.setInterpretation("arrow");
+                newShape.setConfidence(0.5);
+            }
+            // Add shapes to the sketch
+            for (var i = 0; i < trussStrokes.length; i++)
+                newShape.addSubElement(subStrokes[trussStrokes[i]]);
+            return newShape;
+        }
+        function checkArrow(arrowStrokes, subStrokes) {
+            var newShape = new srlib.core.data.container.Shape();
+            var origStrokes = getOriginalStrokes(arrowStrokes,subStrokes);
+            if (IsArrow(origStrokes)) {
+                newShape.setInterpretation("arrow"); // Whatever the shape represents
+                newShape.setConfidence(1.0); // Your recognizer's confidence, may come from how close to a threshold it is in your recognizer, or even probabilities in more sophisticated recognizers
+            } else {
+                newShape.setInterpretation("other");
+                newShape.setConfidence(0.5);
+            }
+            // Add shapes to the sketch
+            for (var i = 0; i < arrowStrokes.length; i++)
+                newShape.addSubElement(subStrokes[arrowStrokes[i]]);
+            return newShape;
+        }
+        function divideArrowStrokes(possibleStrokes, matrix) {
+            var allStrokes = possibleStrokes.slice(0);
+            var arrowStrokes = [];
+            while (allStrokes.length > 0) {
+                var arrow = [0];
+                for (var j = 1; j < allStrokes.length; j++) {
+                    if (matrix[allStrokes[0]][allStrokes[j]][0] === 1 || matrix[allStrokes[0]][allStrokes[j]][1] === 1)
+                        arrow.push(j);
+                }
+                for (var i = arrow.length - 1; i >= 0; i--) {
+                    var rem = arrow[i];
+                    arrow[i] = allStrokes[arrow[i]];
+                    allStrokes.splice(rem, 1);
+                }
+                arrowStrokes.push(arrow);
+            }
+            return arrowStrokes;
+        }
+        function getTrussStrokes(matrix) {
+            var max = matrix.length;
+            var nonTrussIndex = [];
+            var ignore = [];
+            do {
+                matrix = removeRowsAndColumns(matrix, ignore);
+                nonTrussIndex = nonTrussIndex.concat(ignore);
+                ignore = [];
+                for (var i = 0; i < matrix.length; i++) {
+                    var end1 = 1;
+                    var end2 = 1;
+                    for (var j = 0; j < matrix[i].length; j++) {
+                        end1 += matrix[i][j][0];
+                        end2 += matrix[i][j][1];
+                    }
+                    if (end1 < 2 || end2 < 2)
+                        ignore.push(i);
+                }
+            } while (ignore.length > 0);
+            return getOtherIndexes(nonTrussIndex, max);
+        }
+        function getOtherIndexes(remove, max) {
+            var add = [];
+            for (var i = 0; i < max; i++) {
+                if (!remove.includes(i))
+                    add.push(i);
+            }
+            return add;
+        }
+        function removeRowsAndColumns(mat, ignore) {
+            var matrix = mat;
+            for (var x = ignore.length - 1; x >= 0; x--) {
+                matrix.splice(ignore[x], 1);
+            }
+            for (var x = 0; x < matrix.length; x++) {
+                for (var y = ignore.length - 1; y >= 0; y--) {
+                    matrix[x].splice(ignore[y], 1);
+                }
+            }
+            return matrix;
+        }
+        function getConnectivityMatrix(subStrokes, l) {
+            
+			var connectedComponents = [];
+            var n = subStrokes.length;
+            
+			for (var i = 0; i < n; i++) {
+                var connected = [];
+                var subStroke1 = subStrokes[i];
+                var points1 = subStroke1.getPoints();
+                for (var j = 0; j < n; j++) {
+                    var subStroke2 = subStrokes[j];
+                    var points2 = subStroke2.getPoints();
+                    var endConnected = [0, 0];
+                    if (i === j) {
+                    } else if (points1.length > 15 && points2.length > 15) {
+                        if (isCoincident(points1.slice(0, Math.ceil(points1.length / 3)), points2.slice(0, Math.ceil(points2.length / 3)), l))
+                            endConnected[0] = 1;
+                        if (isCoincident(points1.slice(0, Math.ceil(points1.length / 3)), points2.slice(Math.ceil(2 * points2.length / 3), points2.length), l))
+                            endConnected[0] = 1;
+                        if (isCoincident(points1.slice(Math.ceil(2 * points1.length / 3), points1.length), points2.slice(0, Math.ceil(points2.length / 3)), l))
+                            endConnected[1] = 1;
+                        if (isCoincident(points1.slice(Math.ceil(2 * points1.length / 3), points1.length), points2.slice(Math.ceil(2 * points2.length / 3), points2.length), l))
+                            endConnected[1] = 1;
+                    } else {
+                        if (isCoincidentPoints(points1[0], points2[0], l))
+                            endConnected[0] = 1;
+                        if (isCoincidentPoints(points1[0], points2[points2.length - 1], l))
+                            endConnected[0] = 1;
+                        if (isCoincidentPoints(points1[points1.length - 1], points2[0], l))
+                            endConnected[1] = 1;
+                        if (isCoincidentPoints(points1[points1.length - 1], points2[points2.length - 1], l))
+                            endConnected[1] = 1;
+                    }
+                    connected.push(endConnected)
+                }
+                connectedComponents.push(connected);
+            }
+            return connectedComponents;
+        }
+        function isCoincident(points1, points2, l) {
+            for (var i = 0; i < points1.length; i++) {
+                for (var j = 0; j < points2.length; j++) {
+                    var dstnce = distance(points2[j], points1[i]);
+                    if (dstnce < l)
+                        return true;
+                }
+            }
+            return false;
+        }
+        function isCoincidentPoints(point1, point2, l) {
+            var dstnce = distance(point2, point1);
+            return dstnce < l;
+        }
+        function getStrokeLength(subStroke) {
+            var points = subStroke.getPoints();
+            var pd = 0;
+            for (var i = 0; i < points.length - 1; i++)
+                pd = pd + distance(points[i], points[i + 1]);
+            return pd;
+        }
+        function distance(p1, p2) {
+            var x = p1.getX() - p2.getX();
+            var y = p1.getY() - p2.getY();
+            var d = Math.pow(x, 2) + Math.pow(y, 2);
+            return Math.sqrt(d);
+        }
+    </script>
+</head>
+<!-- The body consists simply of a canvas for drawing and a selection list; this display is for the user's benefit, not required -->
+<body>
+
+<canvas id="sketch" width="1024" height="1024" style="position:fixed;top:0px;left:0px;border:1px solid #d3d3d3">
+    Your browser does not support the HTML5 canvas tag.
+</canvas>
+
+<select id="sketches" size="2" style="position:fixed;top:0px;left:0px;width:20%;height:100%;"
+        onchange="updateCanvas()"></select>
+
+<div style="position:fixed;top:0px;right:0px">
+    Draw
+    <input id="drawSubstrokes" type="radio" value="substrokes" onclick="updateDrawSubstrokes()" checked="true">
+    Substrokes
+    <input id="drawShapes" type="radio" value="shapes" onclick="updateDrawShapes()"> Shapes<br>
+</div>
+
+</body>
+</html>
